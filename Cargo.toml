@@ -1,0 +1,9 @@
+[package]
+name = "mjrs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bitflags = "2.13.2"
+image = "0.25.10"
+rgb = "0.8.53"

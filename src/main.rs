@@ -14,69 +14,47 @@ cells! {
 
 fn main() {
     let mut grid = Grid::new(100, 100);
-    let seed = rule_set!(Cell, Symmetries::NONE, [[Black]], [[White]]);
+    let seed = rule_set!(Cell, Symmetries::NONE, [[Black -> White]]);
     grid.apply_once(&seed);
-    let seed = rule_set!(Cell, Symmetries::NONE, [[Black]], [[Red]]);
+    let seed = rule_set!(Cell, Symmetries::NONE, [[Black -> Red]]);
     grid.apply_once(&seed);
-    let spread_red = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Red Black]
-    ], [
-        [_ Red]
-    ]);
-    let spread_white = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [White Black]
-    ], [
-        [_ White]
-    ]);
-    let spread = spread_red.union(&spread_white);
+    let spread = rule_set!(Cell, Symmetries::ROTATIONS,
+        & [[Red, Black -> Red]]
+        & [[White, Black -> White]]
+    );
     while grid.apply_once(&spread) {}
     let border = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Red White]
-    ], [
-        [Blue Blue]
+        [Red -> Blue, White -> Blue]
     ]);
     grid.apply_all(&border);
-    let clear = rule_set!(Cell, Symmetries::NONE, [[[Red White]]], [[Black]]);
+    let clear = rule_set!(Cell, Symmetries::NONE, [
+        [[Red White] -> Black]
+    ]);
     grid.apply_all(&clear);
     let spread_blue = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Blue Black]
-    ], [
-        [_ Blue]
+        [Blue, Black -> Blue]
     ]);
     grid.apply_all(&spread_blue);
     let spread_blue = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Black Blue]
-        [Blue Black]
-    ], [
-        [Blue _]
-        [_ _]
+        [Black -> Blue, Blue]
+        [Blue, Black]
     ]);
     while grid.apply_all(&spread_blue) {}
     let seed = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Blue Black]
-    ], [
-        [_ Green]
+        [Blue, Black -> Green]
     ]);
     while grid.apply_all(&seed) {}
     let seed = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Black]
-    ], [
-        [DarkGreen]
+        [Black -> DarkGreen]
     ]);
     for _ in 0..13 {
         grid.apply_once(&seed);
     }
-    let spread_green = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Green Black]
-    ], [
-        [_ Green]
+    let spread = rule_set!(Cell, Symmetries::ROTATIONS, [
+        [DarkGreen, Black -> DarkGreen]
+    ] & [
+        [Green, Black -> Green]
     ]);
-    let spread_dark_green = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [DarkGreen Black]
-    ], [
-        [_ DarkGreen]
-    ]);
-    let spread = spread_green.union(&spread_dark_green);
     while grid.apply_once(&spread) {}
     grid.export().unwrap().save("output.png").unwrap();
 }

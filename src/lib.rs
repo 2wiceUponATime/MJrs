@@ -95,11 +95,9 @@ macro_rules! cells {
 
 #[macro_export]
 macro_rules! rule_set {
-    ($cell:ident, $symmetries:expr, [
-        $([$($in_item:tt)+])+
-    ], [
-        $([$($out_item:tt)+])+
-    ]) => {{
+    ($cell:ident, $symmetries:expr, $(&)? $([
+        $([$($in_item:tt $(-> $out_item:ident)?),+])+
+    ])&+) => {$({
         #[allow(clippy::unused_unit)]
         let void = &[$([$($crate::rule_set!(@void $in_item)),+]),+];
         let width = void[0].len() as u32;
@@ -107,9 +105,9 @@ macro_rules! rule_set {
         $crate::RuleSet::<$cell>::new(width, height, vec![
             $($($crate::rule_set!(@in_item $cell, $in_item)),*),*
         ], vec![
-            $($($crate::rule_set!(@out_item $cell, $out_item)),*),*
+            $($($crate::rule_set!(@out_item $cell, $($out_item)?)),*),*
         ], $symmetries)
-    }};
+    })&+};
 
     (@in_item $cell:ident, $item:ident) => {{
         use $crate::Bits;
@@ -130,7 +128,7 @@ macro_rules! rule_set {
         Some($cell::$item)
     };
 
-    (@out_item $cell:ident, _) => {
+    (@out_item $cell:ident, ) => {
         None
     };
 
@@ -209,7 +207,7 @@ pub struct Grid<'a, T: Cell> {
     height: u32,
     data: Vec<T>,
     updates: Vec<usize>,
-    nodes: HashMap<&'a RuleSet<T>, RuleNode<'a, T>>,
+    nodes: HashMap<*const RuleSet<T>, RuleNode<'a, T>>,
 }
 
 impl<'a, T: Cell> Grid<'a, T> {
@@ -251,10 +249,11 @@ impl<'a, T: Cell> Grid<'a, T> {
     }
 
     pub fn apply_once(&mut self, set: &'a RuleSet<T>) -> bool {
-        if !self.nodes.contains_key(set) {
-            self.nodes.insert(set, RuleNode::new(set, self));
+        let key = set as *const RuleSet<T>;
+        if !self.nodes.contains_key(&key) {
+            self.nodes.insert(key, RuleNode::new(set, self));
         }
-        let node = self.nodes.get_mut(set).unwrap();
+        let node = self.nodes.get_mut(&key).unwrap();
         let data = GridData {
             width: self.width,
             height: self.height,
@@ -270,10 +269,11 @@ impl<'a, T: Cell> Grid<'a, T> {
     }
 
     pub fn apply_all(&mut self, set: &'a RuleSet<T>) -> bool {
-        if !self.nodes.contains_key(set) {
-            self.nodes.insert(set, RuleNode::new(set, self));
+        let key = set as *const RuleSet<T>;
+        if !self.nodes.contains_key(&key) {
+            self.nodes.insert(key, RuleNode::new(set, self));
         }
-        let node = self.nodes.get_mut(set).unwrap();
+        let node = self.nodes.get_mut(&key).unwrap();
         let data = GridData {
             width: self.width,
             height: self.height,
@@ -501,7 +501,7 @@ bitflags! {
     }
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 struct Rule<T: Cell> {
     width: u32,
     height: u32,
@@ -547,7 +547,6 @@ impl<T: Cell> Rule<T> {
     }
 }
 
-#[derive(Hash, PartialEq, Eq)]
 pub struct RuleSet<T: Cell> {
     rules: Vec<Rule<T>>,
 }
@@ -649,5 +648,13 @@ impl<T: Cell> Display for RuleSet<T> {
             writeln!(f)?;
         }
         Ok(())
+    }
+}
+
+impl<T: Cell> BitAnd<Self> for RuleSet<T> {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self.union(&rhs)
     }
 }

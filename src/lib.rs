@@ -1,13 +1,15 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::{Display, LowerHex},
     hash::Hash,
     mem,
-    ops::{BitAnd, BitOr, Index, IndexMut, Not},
+    ops::{BitAnd, BitOr, Index, Not},
 };
 
 use bitflags::bitflags;
+use bitvec::{bitvec, vec::BitVec};
 use image::RgbImage;
+use rand::{rng, random_range, seq::SliceRandom};
 pub use rgb;
 use rgb::RGB8;
 
@@ -92,35 +94,45 @@ macro_rules! cells {
 }
 
 #[macro_export]
-macro_rules! pattern_set {
-    ($name:ident, $cell:ident, $symmetries:expr, [
-        $([$($item:tt)+])+
-    ]) => {
-        let $name = {
-            #[allow(clippy::unused_unit)]
-            let void = [$([$($crate::pattern_set!(@void $item)),+]),+];
-            let width = void[0].len() as u32;
-            let height = void.len() as u32;
-            $crate::PatternSet::<$cell>::new(width, height, vec![
-                $($($crate::pattern_set!(@item $cell, $item)),*),*
-            ], $symmetries)
-        };
-    };
+macro_rules! rule_set {
+    ($cell:ident, $symmetries:expr, [
+        $([$($in_item:tt)+])+
+    ], [
+        $([$($out_item:tt)+])+
+    ]) => {{
+        #[allow(clippy::unused_unit)]
+        let void = &[$([$($crate::rule_set!(@void $in_item)),+]),+];
+        let width = void[0].len() as u32;
+        let height = void.len() as u32;
+        $crate::RuleSet::<$cell>::new(width, height, vec![
+            $($($crate::rule_set!(@in_item $cell, $in_item)),*),*
+        ], vec![
+            $($($crate::rule_set!(@out_item $cell, $out_item)),*),*
+        ], $symmetries)
+    }};
 
-    (@item $cell:ident, $item:ident) => {{
+    (@in_item $cell:ident, $item:ident) => {{
         use $crate::Bits;
         <$cell as $crate::Cell>::Bits::bit($cell::$item.into())
     }};
 
-    (@item $cell:ident, _) => {{
+    (@in_item $cell:ident, _) => {{
         use $crate::Bits;
         <$cell as $crate::Cell>::Bits::ALL
     }};
 
-    (@item $cell:ident, [$($item:ident)+]) => {{
+    (@in_item $cell:ident, [$($item:ident)+]) => {{
         use $crate::Bits;
         $(<$cell as $crate::Cell>::Bits::bit($cell::$item.into()))|+
     }};
+
+    (@out_item $cell:ident, $item:ident) => {
+        Some($cell::$item)
+    };
+
+    (@out_item $cell:ident, _) => {
+        None
+    };
 
     (@void $($_:tt)*) => {{
         ()
@@ -140,6 +152,14 @@ macro_rules! impl_bits {
     };
 }
 
+fn to_index(x: u32, y: u32, width: u32) -> usize {
+    x as usize + y as usize * width as usize
+}
+
+fn from_index(i: usize, width: u32) -> (u32, u32) {
+    (i as u32 % width, i as u32 / width)
+}
+
 pub trait Bits:
     Default
     + Copy
@@ -156,23 +176,50 @@ pub trait Bits:
 
 impl_bits!(u8, u16, u32, u64, u128);
 
-pub trait Cell: Into<u8> + Into<RGB8> + Eq + Default + Copy {
+pub trait Cell: Into<u8> + Into<RGB8> + Eq + Hash + Default + Copy {
     const COUNT: usize;
     type Bits: Bits;
 }
 
-pub struct Grid<T: Cell> {
+pub struct GridData<'a, T: Cell> {
+    width: u32,
+    height: u32,
+    data: &'a [T],
+    updates: &'a [usize],
+}
+
+impl<T: Cell> Index<(u32, u32)> for GridData<'_, T> {
+    type Output = T;
+
+    fn index(&self, (x, y): (u32, u32)) -> &Self::Output {
+        &self.data[to_index(x, y, self.width)]
+    }
+}
+
+impl<T: Cell> Index<usize> for GridData<'_, T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.data[index]
+    }
+}
+
+pub struct Grid<'a, T: Cell> {
     width: u32,
     height: u32,
     data: Vec<T>,
+    updates: Vec<usize>,
+    nodes: HashMap<&'a RuleSet<T>, RuleNode<'a, T>>,
 }
 
-impl<T: Cell> Grid<T> {
+impl<'a, T: Cell> Grid<'a, T> {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
             data: vec![T::default(); width as usize * height as usize],
+            updates: vec![],
+            nodes: HashMap::new(),
         }
     }
 
@@ -183,11 +230,76 @@ impl<T: Cell> Grid<T> {
             self.width,
             self.height
         );
-        x as usize + y as usize * self.width as usize
+        to_index(x, y, self.width)
     }
 
-    pub fn get(&self, x: u32, y: u32) -> Option<&T> {
-        self.data.get(self.index(x, y))
+    pub fn data(&self) -> GridData<'_, T> {
+        GridData {
+            width: self.width,
+            height: self.height,
+            data: &self.data,
+            updates: &self.updates,
+        }
+    }
+
+    pub fn set(&mut self, x: u32, y: u32, value: T) {
+        let index = self.index(x, y);
+        if self.data[index] != value {
+            self.updates.push(index);
+        }
+        self.data[index] = value;
+    }
+
+    pub fn apply_once(&mut self, set: &'a RuleSet<T>) -> bool {
+        if !self.nodes.contains_key(set) {
+            self.nodes.insert(set, RuleNode::new(set, self));
+        }
+        let node = self.nodes.get_mut(set).unwrap();
+        let data = GridData {
+            width: self.width,
+            height: self.height,
+            data: &self.data,
+            updates: &self.updates,
+        };
+        node.update(&data);
+        let Some(m) = node.get_match(&data) else {
+            return false;
+        };
+        self.apply(m);
+        true
+    }
+
+    pub fn apply_all(&mut self, set: &'a RuleSet<T>) -> bool {
+        if !self.nodes.contains_key(set) {
+            self.nodes.insert(set, RuleNode::new(set, self));
+        }
+        let node = self.nodes.get_mut(set).unwrap();
+        let data = GridData {
+            width: self.width,
+            height: self.height,
+            data: &self.data,
+            updates: &self.updates,
+        };
+        node.update(&data);
+        let matches = node.get_all_matches(&data);
+        if matches.is_empty() {
+            return false;
+        }
+        for m in matches {
+            self.apply(m);
+        }
+        true
+    }
+
+    fn apply(&mut self, (ox, oy, rule): (u32, u32, &Rule<T>)) {
+        for (i, &out) in rule.output.iter().enumerate() {
+            let Some(out) = out else {
+                continue;
+            };
+            let (dx, dy) = from_index(i, rule.width);
+            let (x, y) = (ox + dx, oy + dy);
+            self.set(x, y, out);
+        }
     }
 
     pub fn export(&self) -> Option<RgbImage> {
@@ -200,7 +312,7 @@ impl<T: Cell> Grid<T> {
     }
 }
 
-impl<T: Cell> Display for Grid<T> {
+impl<T: Cell> Display for Grid<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, cell) in self.data.iter().enumerate() {
             if i != 0 && i % self.width as usize == 0 {
@@ -213,7 +325,7 @@ impl<T: Cell> Display for Grid<T> {
     }
 }
 
-impl<T: Cell> Index<(u32, u32)> for Grid<T> {
+impl<T: Cell> Index<(u32, u32)> for Grid<'_, T> {
     type Output = T;
 
     fn index(&self, index: (u32, u32)) -> &Self::Output {
@@ -221,10 +333,152 @@ impl<T: Cell> Index<(u32, u32)> for Grid<T> {
     }
 }
 
-impl<T: Cell> IndexMut<(u32, u32)> for Grid<T> {
-    fn index_mut(&mut self, index: (u32, u32)) -> &mut Self::Output {
-        let index = self.index(index.0, index.1);
-        &mut self.data[index]
+impl<T: Cell> Index<usize> for Grid<'_, T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.data[index]
+    }
+}
+
+struct Match {
+    rule: u32,
+    pos: usize,
+}
+
+impl Match {
+    pub fn new(rule: u32, pos: usize) -> Self {
+        Self { rule, pos }
+    }
+}
+
+struct RuleNode<'a, T: Cell> {
+    rules: &'a RuleSet<T>,
+
+    matches: Vec<Match>,
+    present: Vec<BitVec>,
+
+    // Index into the grid's update log. None means the rule has never run, so it needs to search
+    // the whole grid.
+    cursor: Option<usize>,
+}
+
+impl<'a, T: Cell> RuleNode<'a, T> {
+    pub fn new(rules: &'a RuleSet<T>, grid: &Grid<T>) -> Self {
+        let present =
+            vec![bitvec![0; grid.width as usize * grid.height as usize]; rules.rules.len()];
+        Self {
+            rules,
+            matches: vec![],
+            present,
+            cursor: None,
+        }
+    }
+
+    pub fn get_match(&mut self, grid: &GridData<T>) -> Option<(u32, u32, &'a Rule<T>)> {
+        while self.matches.len() > 0 {
+            let i = random_range(0..self.matches.len());
+            let m = &self.matches[i];
+            let (ox, oy) = from_index(m.pos, grid.width);
+            let rule = &self.rules.rules[m.rule as usize];
+            if rule.matches_at(grid, ox, oy) {
+                return Some((ox, oy, &rule));
+            }
+            self.present[m.rule as usize].set(m.pos, false);
+            self.matches.swap_remove(i);
+        }
+        None
+    }
+
+    pub fn get_all_matches(&mut self, grid: &GridData<T>) -> Vec<(u32, u32, &'a Rule<T>)> {
+        let mut result = vec![];
+        let mut indices: Vec<_> = (0..self.matches.len()).collect();
+        let mut to_remove = Vec::with_capacity(self.matches.len());
+        let mut claimed = bitvec![0; grid.data.len()];
+        indices.shuffle(&mut rng());
+        for i in indices {
+            let m = &self.matches[i];
+            let (ox, oy) = from_index(m.pos, grid.width);
+            let rule = &self.rules.rules[m.rule as usize];
+            if !rule.matches_at(grid, ox, oy) {
+                to_remove.push(i);
+                continue;
+            }
+            for x in ox..ox + rule.width {
+                for y in oy..oy + rule.height {
+                    let j = to_index(x, y, grid.width);
+                    if claimed[j] {
+                        continue;
+                    }
+                    claimed.set(j, true);
+                }
+            }
+            result.push((ox, oy, rule));
+        }
+        to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        for i in to_remove {
+            self.matches.swap_remove(i);
+        }
+        result
+    }
+
+    pub fn update(&mut self, grid: &GridData<T>) {
+        let Some(cursor) = self.cursor else {
+            self.cursor = Some(grid.updates.len());
+            return self.full_scan(grid);
+        };
+        self.cursor = Some(grid.updates.len());
+        let mut checked = HashSet::new();
+        for &pos in &grid.updates[cursor..] {
+            let (x, y) = from_index(pos, grid.width);
+            let cell: u8 = grid[pos].into();
+            for (r, rule) in self.rules.iter().enumerate() {
+                if checked.contains(&(pos, r)) {
+                    continue;
+                }
+                checked.insert((pos, r));
+                for &(dx, dy) in &rule.matches[cell as usize] {
+                    if dx > x || dy > y {
+                        continue;
+                    }
+                    let (ox, oy) = (x - dx, y - dy);
+                    let o = to_index(ox, oy, grid.width);
+                    if self.present[r][o] {
+                        continue;
+                    }
+                    if rule.matches_at(grid, ox, oy) {
+                        self.matches.push(Match::new(r as u32, o));
+                        self.present[r].set(o, true);
+                    }
+                }
+            }
+        }
+    }
+
+    fn full_scan(&mut self, grid: &GridData<T>) {
+        self.matches.clear();
+        for p in &mut self.present {
+            p.fill(false);
+        }
+
+        for (r, rule) in self.rules.iter().enumerate() {
+            for ly in (rule.height - 1..grid.height).step_by(rule.height as usize) {
+                for lx in (rule.width - 1..grid.width).step_by(rule.width as usize) {
+                    let cell: u8 = grid[(lx, ly)].into();
+                    for (dx, dy) in &rule.matches[cell as usize] {
+                        let (ox, oy) = (lx - dx, ly - dy);
+                        if ox + rule.width > grid.width || oy + rule.height > grid.height {
+                            continue;
+                        }
+                        if rule.matches_at(grid, ox, oy) {
+                            let o = to_index(ox, oy, grid.width);
+                            self.present[r].set(o, true);
+                            self.matches.push(Match::new(r as u32, o));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -243,22 +497,26 @@ bitflags! {
         const ROTATIONS = Self::ROT_90.bits()
             | Self::ROT_180.bits()
             | Self::ROT_270.bits();
+        const NONE = 0;
     }
 }
 
-pub struct Pattern<T: Cell> {
+#[derive(Hash, PartialEq, Eq)]
+struct Rule<T: Cell> {
     width: u32,
     height: u32,
-    data: Vec<T::Bits>,
-    /// `matches[i]`: every position within the pattern where cell `i` can be matched
+    input: Vec<T::Bits>,
+    // None = leave unchanged
+    output: Vec<Option<T>>,
+    // `matches[i]`: every position within the pattern where cell `i` can be matched
     matches: Vec<Vec<(u32, u32)>>,
 }
 
-impl<T: Cell> Pattern<T> {
-    pub fn new(width: u32, height: u32, data: Vec<T::Bits>) -> Self {
+impl<T: Cell> Rule<T> {
+    pub fn new(width: u32, height: u32, input: Vec<T::Bits>, output: Vec<Option<T>>) -> Self {
         let mut matches = vec![Vec::new(); T::COUNT];
-        for (i, &mask) in data.iter().enumerate() {
-            let (x, y) = (i as u32 % width, i as u32 / width);
+        for (i, &mask) in input.iter().enumerate() {
+            let (x, y) = from_index(i, width);
             for c in 0..T::COUNT as u8 {
                 if mask & T::Bits::bit(c) != T::Bits::default() {
                     matches[c as usize].push((x, y));
@@ -268,45 +526,85 @@ impl<T: Cell> Pattern<T> {
         Self {
             width,
             height,
-            data,
+            input,
+            output,
             matches,
         }
     }
-}
 
-pub struct PatternSet<T: Cell> {
-    patterns: Vec<Pattern<T>>,
-}
-
-impl<T: Cell> PatternSet<T> {
-    pub fn new(width: u32, height: u32, data: Vec<T::Bits>, symmetries: Symmetries) -> Self {
-        assert_eq!(
-            width as usize * height as usize,
-            data.len(),
-            "Invalid cell count for {width}x{height} grid: {}",
-            data.len()
-        );
-        let mut patterns = HashSet::new();
-        for i in 1..8 {
-            if symmetries.bits() & 1 << i > 0 {
-                patterns.insert(Self::apply_transform(width, height, &data, i));
+    pub fn matches_at(&self, grid: &GridData<T>, ox: u32, oy: u32) -> bool {
+        if ox + self.width > grid.width || oy + self.height > grid.height {
+            return false;
+        }
+        for (i, &bits) in self.input.iter().enumerate() {
+            let (dx, dy) = from_index(i, self.width);
+            let cell: u8 = grid[(ox + dx, oy + dy)].into();
+            if bits & T::Bits::bit(cell) == T::Bits::default() {
+                return false;
             }
         }
-        patterns.insert((width, height, data));
+        true
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+pub struct RuleSet<T: Cell> {
+    rules: Vec<Rule<T>>,
+}
+
+impl<T: Cell> RuleSet<T> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        input: Vec<T::Bits>,
+        output: Vec<Option<T>>,
+        symmetries: Symmetries,
+    ) -> Self {
+        assert_eq!(
+            width as usize * height as usize,
+            input.len(),
+            "Invalid cell count for {width}x{height} grid: {}",
+            input.len()
+        );
+        let mut rules = HashSet::new();
+        for t in 1..8 {
+            if symmetries.bits() & 1 << t > 0 {
+                let (w, h, i) = Self::transform(width, height, &input, t);
+                let (_, _, o) = Self::transform(width, height, &output, t);
+                rules.insert((w, h, i, o));
+            }
+        }
+        rules.insert((width, height, input, output));
         Self {
-            patterns: patterns
+            rules: rules
                 .into_iter()
-                .map(|(width, height, data)| Pattern::new(width, height, data))
+                .map(|(w, h, i, o)| Rule::new(w, h, i, o))
                 .collect(),
         }
     }
 
-    fn apply_transform(
+    pub fn union(&self, other: &Self) -> Self {
+        let rules: HashSet<_> = self.iter().chain(other.iter())
+            .map(|r| (r.width, r.height, r.input.clone(), r.output.clone()))
+            .collect();
+        Self {
+            rules: rules
+                .into_iter()
+                .map(|(w, h, i, o)| Rule::new(w, h, i, o))
+                .collect(),
+        }
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, Rule<T>> {
+        self.rules.iter()
+    }
+
+    fn transform<U: Copy>(
         width: u32,
         height: u32,
-        data: &[T::Bits],
+        data: &[U],
         transform: u8,
-    ) -> (u32, u32, Vec<T::Bits>) {
+    ) -> (u32, u32, Vec<U>) {
         let flip_x = transform & 0b100 != 0;
         let flip_y = transform & 0b010 != 0;
         let transpose = transform & 0b001 != 0;
@@ -317,7 +615,7 @@ impl<T: Cell> PatternSet<T> {
             (width, height)
         };
         for i in 0..data.len() {
-            let (mut x, mut y) = (i as u32 % out_width, i as u32 / out_width);
+            let (mut x, mut y) = from_index(i, out_width);
             if flip_x {
                 x = out_width - 1 - x;
             }
@@ -327,17 +625,17 @@ impl<T: Cell> PatternSet<T> {
             if transpose {
                 (x, y) = (y, x);
             }
-            result.push(data[x as usize + y as usize * width as usize]);
+            result.push(data[to_index(x, y, width)]);
         }
         (out_width, out_height, result)
     }
 }
 
-impl<T: Cell> Display for PatternSet<T> {
+impl<T: Cell> Display for RuleSet<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (i, p) in self.patterns.iter().enumerate() {
+        for (i, p) in self.rules.iter().enumerate() {
             writeln!(f, "{i}:")?;
-            for (i, cell) in p.data.iter().enumerate() {
+            for (i, cell) in p.input.iter().enumerate() {
                 if i != 0 && i % p.width as usize == 0 {
                     writeln!(f)?;
                 }

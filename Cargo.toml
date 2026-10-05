@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 bitflags = "2.13.2"
+bitvec = "1.1.1"
 image = "0.25.10"
+rand = "0.10.3"
 rgb = "0.8.53"

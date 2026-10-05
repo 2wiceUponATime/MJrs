@@ -1,17 +1,19 @@
-use mjrs::{Grid, cells};
+use mjrs::{Grid, Symmetries, cells, pattern_set};
 use rgb::RGB8;
-
-use Cell::*;
 
 cells! {
     Cell {
-        Black => RGB8::new(0, 0, 0),
-        White => RGB8::new(255, 255, 255),
+        B => RGB8::new(0, 0, 0),
+        W => RGB8::new(255, 255, 255),
     }
 }
 
 fn main() {
-    let mut grid = Grid::new(10, 10);
-    grid[(0, 0)] = White;
+    let grid: Grid<Cell> = Grid::new(10, 10);
+    pattern_set!(patterns, Cell, Symmetries::ROTATIONS, [
+        [B W _]
+        [_ [B W] W]
+    ]);
     println!("{grid}");
+    println!("{patterns}");
 }

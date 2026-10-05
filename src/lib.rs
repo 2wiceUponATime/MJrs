@@ -1,5 +1,9 @@
 use std::{
-    fmt::Display, hash::Hash, ops::{BitAnd, BitOr, Index, IndexMut, Not},
+    collections::HashSet,
+    fmt::{Display, LowerHex},
+    hash::Hash,
+    mem,
+    ops::{BitAnd, BitOr, Index, IndexMut, Not},
 };
 
 use bitflags::bitflags;
@@ -30,7 +34,7 @@ macro_rules! cells {
         $vis:vis $name:ident { $($cell:ident => $color:expr),+ $(,)? }
     ) => {
         $(#[$cells_meta])*
-        #[derive(Clone, Copy, Hash)]
+        #[derive(Clone, Copy, Hash, PartialEq, Eq)]
         #[repr(u8)]
         $vis enum $name {
             $($cell,)*
@@ -39,7 +43,7 @@ macro_rules! cells {
         impl $name {
             pub const VALUES: &[Self] = &[$($name::$cell),+];
             pub const COLORS: &[$crate::rgb::RGB8] = &[$($color),+];
-            pub const COUNT: usize = Self::VALUES.len();
+            const COUNT: usize = Self::VALUES.len();
         }
 
         impl From<$name> for u8 {
@@ -67,6 +71,7 @@ macro_rules! cells {
         }
 
         impl $crate::Cell for $name {
+            const COUNT: usize = Self::COUNT;
             type Bits = <$crate::__private::Sel<
                 u8,
                 <$crate::__private::Sel<
@@ -86,6 +91,42 @@ macro_rules! cells {
     };
 }
 
+#[macro_export]
+macro_rules! pattern_set {
+    ($name:ident, $cell:ident, $symmetries:expr, [
+        $([$($item:tt)+])+
+    ]) => {
+        let $name = {
+            #[allow(clippy::unused_unit)]
+            let void = [$([$($crate::pattern_set!(@void $item)),+]),+];
+            let width = void[0].len() as u32;
+            let height = void.len() as u32;
+            $crate::PatternSet::<$cell>::new(width, height, vec![
+                $($($crate::pattern_set!(@item $cell, $item)),*),*
+            ], $symmetries)
+        };
+    };
+
+    (@item $cell:ident, $item:ident) => {{
+        use $crate::Bits;
+        <$cell as $crate::Cell>::Bits::bit($cell::$item.into())
+    }};
+
+    (@item $cell:ident, _) => {{
+        use $crate::Bits;
+        <$cell as $crate::Cell>::Bits::ALL
+    }};
+
+    (@item $cell:ident, [$($item:ident)+]) => {{
+        use $crate::Bits;
+        $(<$cell as $crate::Cell>::Bits::bit($cell::$item.into()))|+
+    }};
+
+    (@void $($_:tt)*) => {{
+        ()
+    }};
+}
+
 macro_rules! impl_bits {
     ($($ty:ty),*) => {
         $(
@@ -100,7 +141,14 @@ macro_rules! impl_bits {
 }
 
 pub trait Bits:
-    Default + Copy + Eq + BitAnd<Output = Self> + BitOr<Output = Self> + Not<Output = Self>
+    Default
+    + Copy
+    + Eq
+    + Hash
+    + BitAnd<Output = Self>
+    + BitOr<Output = Self>
+    + Not<Output = Self>
+    + LowerHex
 {
     const ALL: Self;
     fn bit(index: u8) -> Self;
@@ -108,7 +156,8 @@ pub trait Bits:
 
 impl_bits!(u8, u16, u32, u64, u128);
 
-pub trait Cell: Into<u8> + Into<RGB8> + Default + Copy + Hash {
+pub trait Cell: Into<u8> + Into<RGB8> + Eq + Default + Copy {
+    const COUNT: usize;
     type Bits: Bits;
 }
 
@@ -128,7 +177,12 @@ impl<T: Cell> Grid<T> {
     }
 
     fn index(&self, x: u32, y: u32) -> usize {
-        debug_assert!(x < self.width && y < self.height, "position out of range: ({x}, {y}) - grid size is ({}, {})", self.width, self.height);
+        debug_assert!(
+            x < self.width && y < self.height,
+            "position out of range: ({x}, {y}) - grid size is ({}, {})",
+            self.width,
+            self.height
+        );
         x as usize + y as usize * self.width as usize
     }
 
@@ -175,7 +229,6 @@ impl<T: Cell> IndexMut<(u32, u32)> for Grid<T> {
 }
 
 bitflags! {
-    #[derive(Hash)]
     pub struct Symmetries: u8 {
         // Shift bits: (horizontal flip, vertical flip, transpose) - transpose is applied first
         const IDENTITY = 1 << 0b000;
@@ -193,21 +246,110 @@ bitflags! {
     }
 }
 
-#[derive(Hash)]
 pub struct Pattern<T: Cell> {
     width: u32,
     height: u32,
     data: Vec<T::Bits>,
-    symmetries: Symmetries,
+    /// `matches[i]`: every position within the pattern where cell `i` can be matched
+    matches: Vec<Vec<(u32, u32)>>,
 }
 
 impl<T: Cell> Pattern<T> {
-    pub fn new(width: u32, height: u32, data: Vec<T::Bits>, symmetries: Symmetries) -> Self {
+    pub fn new(width: u32, height: u32, data: Vec<T::Bits>) -> Self {
+        let mut matches = vec![Vec::new(); T::COUNT];
+        for (i, &mask) in data.iter().enumerate() {
+            let (x, y) = (i as u32 % width, i as u32 / width);
+            for c in 0..T::COUNT as u8 {
+                if mask & T::Bits::bit(c) != T::Bits::default() {
+                    matches[c as usize].push((x, y));
+                }
+            }
+        }
         Self {
             width,
             height,
             data,
-            symmetries: symmetries | Symmetries::IDENTITY,
+            matches,
         }
+    }
+}
+
+pub struct PatternSet<T: Cell> {
+    patterns: Vec<Pattern<T>>,
+}
+
+impl<T: Cell> PatternSet<T> {
+    pub fn new(width: u32, height: u32, data: Vec<T::Bits>, symmetries: Symmetries) -> Self {
+        assert_eq!(
+            width as usize * height as usize,
+            data.len(),
+            "Invalid cell count for {width}x{height} grid: {}",
+            data.len()
+        );
+        let mut patterns = HashSet::new();
+        for i in 1..8 {
+            if symmetries.bits() & 1 << i > 0 {
+                patterns.insert(Self::apply_transform(width, height, &data, i));
+            }
+        }
+        patterns.insert((width, height, data));
+        Self {
+            patterns: patterns
+                .into_iter()
+                .map(|(width, height, data)| Pattern::new(width, height, data))
+                .collect(),
+        }
+    }
+
+    fn apply_transform(
+        width: u32,
+        height: u32,
+        data: &[T::Bits],
+        transform: u8,
+    ) -> (u32, u32, Vec<T::Bits>) {
+        let flip_x = transform & 0b100 != 0;
+        let flip_y = transform & 0b010 != 0;
+        let transpose = transform & 0b001 != 0;
+        let mut result = Vec::with_capacity(data.len());
+        let (out_width, out_height) = if transpose {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        for i in 0..data.len() {
+            let (mut x, mut y) = (i as u32 % out_width, i as u32 / out_width);
+            if flip_x {
+                x = out_width - 1 - x;
+            }
+            if flip_y {
+                y = out_height - 1 - y;
+            }
+            if transpose {
+                (x, y) = (y, x);
+            }
+            result.push(data[x as usize + y as usize * width as usize]);
+        }
+        (out_width, out_height, result)
+    }
+}
+
+impl<T: Cell> Display for PatternSet<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, p) in self.patterns.iter().enumerate() {
+            writeln!(f, "{i}:")?;
+            for (i, cell) in p.data.iter().enumerate() {
+                if i != 0 && i % p.width as usize == 0 {
+                    writeln!(f)?;
+                }
+                let value = cell;
+                write!(
+                    f,
+                    " {value:0width$x}",
+                    width = mem::size_of::<T::Bits>() * 2
+                )?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
     }
 }

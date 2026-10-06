@@ -152,7 +152,7 @@ macro_rules! markov {
     };
 
     // `let name = rule`
-    (@body $cell:ident, $sym:ident, let $name:ident = $(|)? $([$($item:tt)*])|*; $($rest:tt)*) => {
+    (@body $cell:ident, $sym:ident, rule $name:ident = $(|)? $([$($item:tt)*])|*; $($rest:tt)*) => {
         let $name = $crate::rule_set!($cell, $sym, $([$($item)*])|*);
         $crate::markov!(@body $cell, $sym, $($rest)*);
     };
@@ -185,9 +185,13 @@ macro_rules! markov {
         $crate::markov!(@head $cell, $sym, [for] $($rest)*);
     };
 
-    // Consumes other exprs
+    // Consumes other expressions and statements
     (@body $cell:ident, $sym:ident, $e:expr; $($rest:tt)*) => {
         $e;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+    (@body $cell:ident, $sym:ident, $s:stmt; $($rest:tt)*) => {
+        $s;
         $crate::markov!(@body $cell, $sym, $($rest)*);
     };
     // Allow extra semicolons

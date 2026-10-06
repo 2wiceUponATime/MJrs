@@ -16,39 +16,39 @@ fn main() {
     let mut grid = Grid::new(100, 100);
     markov!(Cell, {
         #[Symmetries::NONE]
-        let seed = [[Black -> White]];
+        rule seed = [[Black -> White]];
         grid.apply_once(&seed);
 
-        let seed = [[Black -> Red]];
+        rule seed = [[Black -> Red]];
         grid.apply_once(&seed);
 
         #[Symmetries::ROTATIONS]
-        let spread = [[Red, Black -> Red]] | [[White, Black -> White]];
+        rule spread = [[Red, Black -> Red]] | [[White, Black -> White]];
         while grid.apply_once(&spread) {}
 
-        let border = [[Red -> Blue, White -> Blue]];
+        rule border = [[Red -> Blue, White -> Blue]];
         grid.apply_all(&border);
 
-        let clear = [[Red | White -> Black]];
+        rule clear = [[Red | White -> Black]];
         grid.apply_all(&clear);
 
-        let spread = [[Blue, Black -> Blue]];
+        rule spread = [[Blue, Black -> Blue]];
         grid.apply_all(&spread);
-        let spread = [
+        rule spread = [
             [Black -> Blue, Blue]
             [Blue, Black]
         ];
         while grid.apply_all(&spread) {}
 
-        let seed = [[Blue, Black -> Green]];
+        rule seed = [[Blue, Black -> Green]];
         while grid.apply_all(&seed) {}
 
-        let seed = [[Black -> DarkGreen]];
+        rule seed = [[Black -> DarkGreen]];
         for _ in 0..13 {
             grid.apply_once(&seed);
         }
 
-        let spread_green = [[Green, Black -> Green]] | [[DarkGreen, Black -> DarkGreen]];
+        rule spread_green = [[Green, Black -> Green]] | [[DarkGreen, Black -> DarkGreen]];
         while grid.apply_once(&spread_green) {}
     });
     grid.export().unwrap().save("output.png").unwrap();

@@ -9,7 +9,7 @@ use std::{
 use bitflags::bitflags;
 use bitvec::{bitvec, vec::BitVec};
 use image::RgbImage;
-use rand::{rng, random_range, seq::SliceRandom};
+use rand::{random_range, rng, seq::SliceRandom};
 pub use rgb;
 use rgb::RGB8;
 
@@ -95,31 +95,31 @@ macro_rules! cells {
 
 #[macro_export]
 macro_rules! rule_set {
-    ($cell:ident, $symmetries:expr, $(&)? $([
-        $([$($in_item:tt $(-> $out_item:ident)?),+])+
-    ])&+) => {$({
+    ($cell:ident, $symmetries:expr, $(|)? $([
+        $([$($($in_item:tt)|+ $(-> $out_item:ident)?),+])+
+    ])|+) => {$(({
         #[allow(clippy::unused_unit)]
-        let void = &[$([$($crate::rule_set!(@void $in_item)),+]),+];
-        let width = void[0].len() as u32;
-        let height = void.len() as u32;
-        $crate::RuleSet::<$cell>::new(width, height, vec![
-            $($($crate::rule_set!(@in_item $cell, $in_item)),*),*
-        ], vec![
-            $($($crate::rule_set!(@out_item $cell, $($out_item)?)),*),*
-        ], $symmetries)
-    })&+};
-
-    (@in_item $cell:ident, $item:ident) => {{
-        use $crate::Bits;
-        <$cell as $crate::Cell>::Bits::bit($cell::$item.into())
-    }};
+        const WIDTH: u32 = [$([$($crate::rule_set!(@unit $($in_item)+)),+]),+][0].len() as u32;
+        #[allow(clippy::unused_unit)]
+        const HEIGHT: u32 = [$($crate::rule_set!(@unit $($($in_item)+)+)),+].len() as u32;
+        $crate::RuleSet::<$cell>::new(
+            WIDTH, HEIGHT,
+            vec![
+                $($($crate::rule_set!(@in_item $cell, $($in_item)|+)),*),*
+            ],
+            vec![
+                $($($crate::rule_set!(@out_item $cell, $($out_item)?)),*),*
+            ],
+            $symmetries
+        )
+    }))|+};
 
     (@in_item $cell:ident, _) => {{
         use $crate::Bits;
         <$cell as $crate::Cell>::Bits::ALL
     }};
 
-    (@in_item $cell:ident, [$($item:ident)+]) => {{
+    (@in_item $cell:ident, $($item:ident)|+) => {{
         use $crate::Bits;
         $(<$cell as $crate::Cell>::Bits::bit($cell::$item.into()))|+
     }};
@@ -128,13 +128,95 @@ macro_rules! rule_set {
         Some($cell::$item)
     };
 
-    (@out_item $cell:ident, ) => {
+    (@out_item $cell:ident,) => {
         None
     };
 
-    (@void $($_:tt)*) => {{
+    (@unit $($_:tt)*) => {{
         ()
     }};
+}
+
+#[macro_export]
+macro_rules! markov {
+    ($cell:ident, {
+        $($body:tt)*
+    }) => {
+        $crate::markov!(@body $cell, symmetries, $($body)*)
+    };
+
+    // `#[symmetries]`
+    (@body $cell:ident, $sym:ident, #[$symmetries:expr] $($rest:tt)*) => {
+        let $sym = $symmetries;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+
+    // `let name = rule`
+    (@body $cell:ident, $sym:ident, let $name:ident = $(|)? $([$($item:tt)*])|*; $($rest:tt)*) => {
+        let $name = $crate::rule_set!($cell, $sym, $([$($item)*])|*);
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+
+    // Simple block-like expressions
+    (@body $cell:ident, $sym:ident, loop $b:block $($rest:tt)*) => {
+        loop $b;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+    (@body $cell:ident, $sym:ident, unsafe $b:block $($rest:tt)*) => {
+        unsafe $b;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+    (@body $cell:ident, $sym:ident, $b:block $($rest:tt)*) => {
+        $b;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+
+    // Block-like expressions where there are tokens between the keyword and the block
+    (@body $cell:ident, $sym:ident, if $($rest:tt)*) => {
+        $crate::markov!(@head $cell, $sym, [if] $($rest)*);
+    };
+    (@body $cell:ident, $sym:ident, match $($rest:tt)*) => {
+        $crate::markov!(@head $cell, $sym, [match] $($rest)*);
+    };
+    (@body $cell:ident, $sym:ident, while $($rest:tt)*) => {
+        $crate::markov!(@head $cell, $sym, [while] $($rest)*);
+    };
+    (@body $cell:ident, $sym:ident, for $($rest:tt)*) => {
+        $crate::markov!(@head $cell, $sym, [for] $($rest)*);
+    };
+
+    // Consumes other exprs
+    (@body $cell:ident, $sym:ident, $e:expr; $($rest:tt)*) => {
+        $e;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+    // Allow extra semicolons
+    (@body $cell:ident, $sym:ident, ; $($rest:tt)*) => {
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+    // Base case
+    (@body $cell:ident, $sym:ident,) => {};
+
+    // Consumes tokens until a block
+    (@head $cell:ident, $sym:ident, [$($acc:tt)+] $b:block $($rest:tt)*) => {
+        $crate::markov!(@tail $cell, $sym, [$($acc)+ $b] $($rest)*);
+    };
+    (@head $cell:ident, $sym:ident, [$($acc:tt)+] $t:tt $($rest:tt)*) => {
+        $crate::markov!(@head $cell, $sym, [$($acc)+ $t] $($rest)*);
+    };
+
+    // Handles `else` and `else if`
+    (@tail $cell:ident, $sym:ident, [$($acc:tt)+] else if $($rest:tt)*) => {
+        $crate::markov!(@head $cell, $sym, [$($acc)+ else if] $($rest)*);
+    };
+    (@tail $cell:ident, $sym:ident, [$($acc:tt)+] else $b:block $($rest:tt)*) => {
+        $($acc)+ else $b;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
+    (@tail $cell:ident, $sym:ident, [$($acc:tt)+] $($rest:tt)*) => {
+        $($acc)+;
+        $crate::markov!(@body $cell, $sym, $($rest)*);
+    };
 }
 
 macro_rules! impl_bits {
@@ -376,13 +458,13 @@ impl<'a, T: Cell> RuleNode<'a, T> {
     }
 
     pub fn get_match(&mut self, grid: &GridData<T>) -> Option<(u32, u32, &'a Rule<T>)> {
-        while self.matches.len() > 0 {
+        while !self.matches.is_empty() {
             let i = random_range(0..self.matches.len());
             let m = &self.matches[i];
             let (ox, oy) = from_index(m.pos, grid.width);
             let rule = &self.rules.rules[m.rule as usize];
             if rule.matches_at(grid, ox, oy) {
-                return Some((ox, oy, &rule));
+                return Some((ox, oy, rule));
             }
             self.present[m.rule as usize].set(m.pos, false);
             self.matches.swap_remove(i);
@@ -483,6 +565,7 @@ impl<'a, T: Cell> RuleNode<'a, T> {
 }
 
 bitflags! {
+    #[derive(Clone, Copy)]
     pub struct Symmetries: u8 {
         // Shift bits: (horizontal flip, vertical flip, transpose) - transpose is applied first
         const IDENTITY = 1 << 0b000;
@@ -583,7 +666,9 @@ impl<T: Cell> RuleSet<T> {
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        let rules: HashSet<_> = self.iter().chain(other.iter())
+        let rules: HashSet<_> = self
+            .iter()
+            .chain(other.iter())
             .map(|r| (r.width, r.height, r.input.clone(), r.output.clone()))
             .collect();
         Self {
@@ -651,10 +736,10 @@ impl<T: Cell> Display for RuleSet<T> {
     }
 }
 
-impl<T: Cell> BitAnd<Self> for RuleSet<T> {
+impl<T: Cell> BitOr<Self> for RuleSet<T> {
     type Output = Self;
 
-    fn bitand(self, rhs: Self) -> Self::Output {
+    fn bitor(self, rhs: Self) -> Self::Output {
         self.union(&rhs)
     }
 }

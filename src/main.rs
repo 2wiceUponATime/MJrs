@@ -1,4 +1,4 @@
-use mjrs::{Grid, Symmetries, cells, rule_set};
+use mjrs::{Grid, Symmetries, cells, markov};
 use rgb::RGB8;
 
 cells! {
@@ -14,47 +14,42 @@ cells! {
 
 fn main() {
     let mut grid = Grid::new(100, 100);
-    let seed = rule_set!(Cell, Symmetries::NONE, [[Black -> White]]);
-    grid.apply_once(&seed);
-    let seed = rule_set!(Cell, Symmetries::NONE, [[Black -> Red]]);
-    grid.apply_once(&seed);
-    let spread = rule_set!(Cell, Symmetries::ROTATIONS,
-        & [[Red, Black -> Red]]
-        & [[White, Black -> White]]
-    );
-    while grid.apply_once(&spread) {}
-    let border = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Red -> Blue, White -> Blue]
-    ]);
-    grid.apply_all(&border);
-    let clear = rule_set!(Cell, Symmetries::NONE, [
-        [[Red White] -> Black]
-    ]);
-    grid.apply_all(&clear);
-    let spread_blue = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Blue, Black -> Blue]
-    ]);
-    grid.apply_all(&spread_blue);
-    let spread_blue = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Black -> Blue, Blue]
-        [Blue, Black]
-    ]);
-    while grid.apply_all(&spread_blue) {}
-    let seed = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Blue, Black -> Green]
-    ]);
-    while grid.apply_all(&seed) {}
-    let seed = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [Black -> DarkGreen]
-    ]);
-    for _ in 0..13 {
+    markov!(Cell, {
+        #[Symmetries::NONE]
+        let seed = [[Black -> White]];
         grid.apply_once(&seed);
-    }
-    let spread = rule_set!(Cell, Symmetries::ROTATIONS, [
-        [DarkGreen, Black -> DarkGreen]
-    ] & [
-        [Green, Black -> Green]
-    ]);
-    while grid.apply_once(&spread) {}
+
+        let seed = [[Black -> Red]];
+        grid.apply_once(&seed);
+
+        #[Symmetries::ROTATIONS]
+        let spread = [[Red, Black -> Red]] | [[White, Black -> White]];
+        while grid.apply_once(&spread) {}
+
+        let border = [[Red -> Blue, White -> Blue]];
+        grid.apply_all(&border);
+
+        let clear = [[Red | White -> Black]];
+        grid.apply_all(&clear);
+
+        let spread = [[Blue, Black -> Blue]];
+        grid.apply_all(&spread);
+        let spread = [
+            [Black -> Blue, Blue]
+            [Blue, Black]
+        ];
+        while grid.apply_all(&spread) {}
+
+        let seed = [[Blue, Black -> Green]];
+        while grid.apply_all(&seed) {}
+
+        let seed = [[Black -> DarkGreen]];
+        for _ in 0..13 {
+            grid.apply_once(&seed);
+        }
+
+        let spread_green = [[Green, Black -> Green]] | [[DarkGreen, Black -> DarkGreen]];
+        while grid.apply_once(&spread_green) {}
+    });
     grid.export().unwrap().save("output.png").unwrap();
 }

@@ -1,0 +1,17 @@
+{
+  "name": "rule-highlight",
+  "displayName": "Rule Highlight",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "contributes": {
+    "grammars": [
+      {
+        "scopeName": "rule-highlight.injection",
+        "path": "./syntaxes/rule.injection.json",
+        "injectTo": ["source.rust"]
+      }
+    ]
+  }
+}

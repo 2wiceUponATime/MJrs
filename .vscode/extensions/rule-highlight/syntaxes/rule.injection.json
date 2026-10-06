@@ -1,0 +1,15 @@
+{
+  "scopeName": "rule-highlight.injection",
+  "injectionSelector": "L:source.rust -comment -string",
+  "patterns": [{ "include": "#rule-decl" }],
+  "repository": {
+    "rule-decl": {
+      "match": "\\b(rule)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(=)(?!=)",
+      "captures": {
+        "1": { "name": "keyword.other.rule.rust" },
+        "2": { "name": "variable.other.rule.rust" },
+        "3": { "name": "keyword.operator.assignment.rust" }
+      }
+    }
+  }
+}
